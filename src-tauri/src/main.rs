@@ -262,14 +262,14 @@ fn npu_compiler_dir() -> Option<PathBuf> {
         .find(|path| path.join("libnpu_driver_compiler.so").exists())
 }
 
-fn fast_npu_model_dir() -> Option<PathBuf> {
+fn best_stt_model_dir() -> Option<PathBuf> {
     let home = env::var_os("HOME")?;
     let model_dir = PathBuf::from(home)
         .join(".local")
         .join("share")
         .join("dictophone")
         .join("models")
-        .join("whisper-tiny-fp16-ov");
+        .join("whisper-large-v3-fp16-ov");
     if model_dir.exists() {
         Some(model_dir)
     } else {
@@ -277,14 +277,14 @@ fn fast_npu_model_dir() -> Option<PathBuf> {
     }
 }
 
-fn npu_polish_model_dir() -> Option<PathBuf> {
+fn best_polish_model_dir() -> Option<PathBuf> {
     let home = env::var_os("HOME")?;
     let model_dir = PathBuf::from(home)
         .join(".local")
         .join("share")
         .join("dictophone")
         .join("models")
-        .join("qwen2.5-1.5b-instruct-int4-ov");
+        .join("qwen2.5-7b-instruct-int4-ov");
     if model_dir.exists() {
         Some(model_dir)
     } else {
@@ -312,8 +312,8 @@ fn configure_backend_environment(command: &mut Command) {
             command.env("DICTOPHONE_DEVICE", "NPU");
         }
         if env::var_os("DICTOPHONE_MODEL_DIR").is_none() {
-            if let Some(model_dir) = fast_npu_model_dir() {
-                command.env("DICTOPHONE_MODEL_ID", "OpenVINO/whisper-tiny-fp16-ov");
+            if let Some(model_dir) = best_stt_model_dir() {
+                command.env("DICTOPHONE_MODEL_ID", "OpenVINO/whisper-large-v3-fp16-ov");
                 command.env("DICTOPHONE_MODEL_DIR", model_dir);
             }
         }
@@ -321,8 +321,8 @@ fn configure_backend_environment(command: &mut Command) {
             command.env("DICTOPHONE_POLISH_DEVICE", "NPU");
         }
         if env::var_os("DICTOPHONE_POLISH_MODEL_DIR").is_none() {
-            if let Some(model_dir) = npu_polish_model_dir() {
-                command.env("DICTOPHONE_POLISH_MODEL_ID", "OpenVINO/Qwen2.5-1.5B-Instruct-int4-ov");
+            if let Some(model_dir) = best_polish_model_dir() {
+                command.env("DICTOPHONE_POLISH_MODEL_ID", "OpenVINO/Qwen2.5-7B-Instruct-int4-ov");
                 command.env("DICTOPHONE_POLISH_MODEL_DIR", model_dir);
             }
         }

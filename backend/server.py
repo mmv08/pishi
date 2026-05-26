@@ -16,10 +16,11 @@ from typing import Any
 
 
 APP_VERSION = "0.1.0"
-DEFAULT_MODEL_ID = "OpenVINO/whisper-large-v3-turbo-fp16-ov"
-DEFAULT_MODEL_DIR = Path.home() / ".local" / "share" / "dictophone" / "models" / "whisper-large-v3-turbo"
-DEFAULT_POLISH_MODEL_ID = "OpenVINO/Qwen2.5-1.5B-Instruct-int4-ov"
-DEFAULT_POLISH_MODEL_DIR = Path.home() / ".local" / "share" / "dictophone" / "models" / "qwen2.5-1.5b-instruct-int4-ov"
+DEFAULT_MODEL_ID = "OpenVINO/whisper-large-v3-fp16-ov"
+DEFAULT_MODEL_DIR = Path.home() / ".local" / "share" / "dictophone" / "models" / "whisper-large-v3-fp16-ov"
+DEFAULT_POLISH_MODEL_ID = "OpenVINO/Qwen2.5-7B-Instruct-int4-ov"
+DEFAULT_POLISH_MODEL_DIR = Path.home() / ".local" / "share" / "dictophone" / "models" / "qwen2.5-7b-instruct-int4-ov"
+DEFAULT_OPENVINO_CACHE_DIR = Path.home() / ".cache" / "dictophone" / "openvino"
 LANGUAGE_TOKENS = {
     "en": "<|en|>",
     "de": "<|de|>",
@@ -35,6 +36,7 @@ class Runtime:
         self.polish_model_id = os.environ.get("DICTOPHONE_POLISH_MODEL_ID", DEFAULT_POLISH_MODEL_ID)
         self.polish_model_dir = Path(os.environ.get("DICTOPHONE_POLISH_MODEL_DIR", DEFAULT_POLISH_MODEL_DIR)).expanduser()
         self.polish_device = os.environ.get("DICTOPHONE_POLISH_DEVICE", self.device)
+        self.cache_dir = Path(os.environ.get("DICTOPHONE_OPENVINO_CACHE_DIR", DEFAULT_OPENVINO_CACHE_DIR)).expanduser()
         self.npu_compiler_override = os.environ.get("DICTOPHONE_NPU_COMPILER_DIR")
         self.pipeline: Any | None = None
         self.polish_pipeline: Any | None = None
@@ -87,9 +89,10 @@ class Runtime:
             }
 
         selected_device = resolve_device(self.device, self.available_devices())
+        cache_kwargs = openvino_cache_kwargs(self.cache_dir, "stt", selected_device)
         started = time.perf_counter()
         try:
-            self.pipeline = self.openvino_genai.WhisperPipeline(str(self.model_dir), selected_device)
+            self.pipeline = self.openvino_genai.WhisperPipeline(str(self.model_dir), selected_device, **cache_kwargs)
         except Exception as exc:
             self.pipeline = None
             return {
@@ -127,13 +130,15 @@ class Runtime:
             }
 
         selected_device = resolve_device(self.polish_device, self.available_devices())
+        cache_kwargs = openvino_cache_kwargs(self.cache_dir, "polish", selected_device)
         started = time.perf_counter()
         try:
             self.polish_pipeline = self.openvino_genai.LLMPipeline(
                 str(self.polish_model_dir),
                 selected_device,
-                MAX_PROMPT_LEN=768,
+                MAX_PROMPT_LEN=1536,
                 MIN_RESPONSE_LEN=32,
+                **cache_kwargs,
             )
         except Exception as exc:
             self.polish_pipeline = None
@@ -224,7 +229,7 @@ class Runtime:
         try:
             result = self.polish_pipeline.generate(
                 prompt,
-                max_new_tokens=128,
+                max_new_tokens=polish_token_budget(text),
                 do_sample=False,
                 repetition_penalty=1.05,
                 stop_strings={"\n\n", "Dictated text:", "Task:"},
@@ -326,6 +331,19 @@ def resolve_device(requested: str, devices: list[str]) -> str:
         if candidate in devices:
             return candidate
     return devices[0] if devices else "CPU"
+
+
+def openvino_cache_kwargs(cache_root: Path, model_kind: str, device: str) -> dict[str, str]:
+    try:
+        cache_dir = cache_root / f"{model_kind}-{device.lower()}"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return {}
+
+    properties = {"CACHE_DIR": str(cache_dir)}
+    if device == "NPU" and model_kind == "polish":
+        properties["CACHE_MODE"] = "OPTIMIZE_SPEED"
+    return properties
 
 
 def json_response(handler: BaseHTTPRequestHandler, status: int, body: dict[str, Any]) -> None:
@@ -479,6 +497,11 @@ def polish_prompt(text: str, language: str) -> str:
         f"Dictated text: {text}\n"
         "Cleaned text:"
     )
+
+
+def polish_token_budget(text: str) -> int:
+    word_count = max(1, len(re.findall(r"\S+", text)))
+    return min(768, max(128, word_count * 3 + 64))
 
 
 def sanitize_polish_output(output: str, original: str) -> str:

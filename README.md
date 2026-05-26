@@ -2,7 +2,7 @@
 
 Local dictation for Fedora/GNOME with a Tauri + React UI and an OpenVINO backend tuned for Intel Core Ultra laptops.
 
-Pishi records from PipeWire, transcribes speech with Whisper on the Intel NPU, and can run a small OpenVINO LLM on the NPU to polish punctuation and cleanup.
+Pishi records from PipeWire, transcribes speech with Whisper on the Intel NPU, and can run an OpenVINO LLM on the NPU to polish punctuation and cleanup.
 
 ## Stack
 
@@ -11,8 +11,8 @@ Pishi records from PipeWire, transcribes speech with Whisper on the Intel NPU, a
 - Python backend using `openvino-genai`
 - PipeWire recording via `pw-record`
 - Wayland paste via `wl-copy` + `wtype`
-- STT model: `OpenVINO/whisper-tiny-fp16-ov`
-- Polish model: `OpenVINO/Qwen2.5-1.5B-Instruct-int4-ov`
+- STT model: `OpenVINO/whisper-large-v3-fp16-ov`
+- Polish model: `OpenVINO/Qwen2.5-7B-Instruct-int4-ov`
 
 ## Requirements
 
@@ -47,10 +47,12 @@ from huggingface_hub import snapshot_download
 from pathlib import Path
 
 base = Path.home() / ".local/share/dictophone/models"
-snapshot_download("OpenVINO/whisper-tiny-fp16-ov", local_dir=base / "whisper-tiny-fp16-ov")
-snapshot_download("OpenVINO/Qwen2.5-1.5B-Instruct-int4-ov", local_dir=base / "qwen2.5-1.5b-instruct-int4-ov")
+snapshot_download("OpenVINO/whisper-large-v3-fp16-ov", local_dir=base / "whisper-large-v3-fp16-ov")
+snapshot_download("OpenVINO/Qwen2.5-7B-Instruct-int4-ov", local_dir=base / "qwen2.5-7b-instruct-int4-ov")
 PY
 ```
+
+These defaults optimize for correctness over minimum latency. The first NPU run can spend several minutes compiling model graphs; subsequent runs use the OpenVINO cache at `~/.cache/dictophone/openvino`. On the target laptop, the two default models use about 7 GB and the warmed NPU cache uses about 9 GB.
 
 ## NPU Compiler Workaround
 
