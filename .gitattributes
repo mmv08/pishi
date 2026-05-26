@@ -1,0 +1,1 @@
+vendor/intel-npu-compiler/*.so filter=lfs diff=lfs merge=lfs -text
