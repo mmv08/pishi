@@ -73,7 +73,6 @@ type InsertResult = {
 };
 
 type RecorderState = "idle" | "recording" | "transcribing" | "error";
-type PolishMode = "off" | "light" | "polished";
 type LanguageMode = "auto" | "en" | "de" | "ru";
 
 const languageLabels: Record<LanguageMode, string> = {
@@ -83,17 +82,10 @@ const languageLabels: Record<LanguageMode, string> = {
   ru: "Russian",
 };
 
-const polishLabels: Record<PolishMode, string> = {
-  off: "Raw",
-  light: "Light",
-  polished: "Polished",
-};
-
 const STORAGE_KEY = "dictophone:v1";
 
 type StoredState = {
   language?: LanguageMode;
-  polish?: PolishMode;
   history?: HistoryItem[];
 };
 
@@ -113,13 +105,13 @@ function App() {
   const [status, setStatus] = useState<RecorderState>("idle");
   const [message, setMessage] = useState("Ready");
   const [language, setLanguage] = useState<LanguageMode>(stored.language ?? "auto");
-  const [polish, setPolish] = useState<PolishMode>(stored.polish ?? "light");
   const [lastTranscript, setLastTranscript] = useState<TranscriptResult | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>(stored.history ?? []);
   const [recordingMs, setRecordingMs] = useState(0);
   const [insertMethod, setInsertMethod] = useState<string>("clipboard paste");
   const [modelBusy, setModelBusy] = useState(false);
   const [polishBusy, setPolishBusy] = useState(false);
+  const [polishLoadAttempted, setPolishLoadAttempted] = useState(false);
   const startedAt = useRef<number>(0);
   const ticker = useRef<number | null>(null);
 
@@ -153,18 +145,18 @@ function App() {
       STORAGE_KEY,
       JSON.stringify({
         language,
-        polish,
         history: history.slice(0, 20),
       }),
     );
-  }, [language, polish, history]);
+  }, [language, history]);
 
   useEffect(() => {
-    if (polish !== "polished" || polishBusy || health?.polish_model_loaded || !health?.openvino_available) {
+    if (polishLoadAttempted || polishBusy || health?.polish_model_loaded || !health?.openvino_available) {
       return;
     }
+    setPolishLoadAttempted(true);
     void loadPolishModel();
-  }, [polish, polishBusy, health?.polish_model_loaded, health?.openvino_available]);
+  }, [polishLoadAttempted, polishBusy, health?.polish_model_loaded, health?.openvino_available]);
 
   const activeDevice = useMemo(() => {
     if (health?.device && health.device !== "AUTO") {
@@ -211,7 +203,6 @@ function App() {
     try {
       const result = await invoke<TranscriptResult>("stop_recording_and_transcribe", {
         language,
-        polish,
       });
       if (!result.ok) {
         throw new Error(result.message ?? result.code ?? "Transcription failed");
@@ -305,6 +296,7 @@ function App() {
   }
 
   async function loadPolishModel(device = health?.resolved_polish_device ?? health?.polish_device ?? activeDevice) {
+    setPolishLoadAttempted(true);
     setPolishBusy(true);
     setMessage(`Loading polish on ${device}`);
     try {
@@ -331,9 +323,9 @@ function App() {
     ? "Loaded"
     : polishBusy
       ? "Loading"
-      : polish === "polished"
+      : health?.openvino_available
         ? "Needed"
-        : "Idle";
+        : "Rules";
 
   return (
     <main className="app-shell">
@@ -365,15 +357,6 @@ function App() {
               ))}
             </select>
           </label>
-
-          <label>
-            <span><Sparkles size={16} /> Polish</span>
-            <select value={polish} onChange={(event) => setPolish(event.target.value as PolishMode)}>
-              {Object.entries(polishLabels).map(([value, label]) => (
-                <option key={value} value={value}>{label}</option>
-              ))}
-            </select>
-          </label>
         </section>
 
         <div className="side-actions">
@@ -394,11 +377,9 @@ function App() {
           </button>
         </div>
 
-        {polish === "polished" && (
-          <button className="secondary-button wide-button" onClick={() => loadPolishModel()} disabled={polishBusy}>
-            <Sparkles size={16} /> Load Polish
-          </button>
-        )}
+        <button className="secondary-button wide-button" onClick={() => loadPolishModel()} disabled={polishBusy}>
+          <Sparkles size={16} /> Load Polish
+        </button>
       </aside>
 
       <section className="workspace">
@@ -432,7 +413,7 @@ function App() {
           </button>
           <div className="record-meta">
             <strong>{isRecording ? `${elapsed}s` : lastTranscript ? `${lastTranscript.duration_ms} ms` : "Ready"}</strong>
-            <span>{isRecording ? "Listening" : isBusy ? "Processing" : `${languageLabels[language]} · ${polishLabels[polish]}`}</span>
+            <span>{isRecording ? "Listening" : isBusy ? "Processing" : `${languageLabels[language]} · Polished`}</span>
           </div>
         </section>
 
@@ -448,12 +429,6 @@ function App() {
           <div className="transcript-box">
             {lastTranscript?.text || "Your next dictation will appear here."}
           </div>
-          {lastTranscript?.raw_text && lastTranscript.raw_text !== lastTranscript.text && (
-            <details className="raw-details">
-              <summary>Raw transcript</summary>
-              <p>{lastTranscript.raw_text}</p>
-            </details>
-          )}
         </section>
 
         <section className="history-area">
