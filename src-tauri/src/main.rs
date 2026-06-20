@@ -78,7 +78,6 @@ fn start_recording(state: tauri::State<'_, BackendState>) -> Result<String, Stri
 fn stop_recording_and_transcribe(
     state: tauri::State<'_, BackendState>,
     language: String,
-    polish: String,
 ) -> Result<serde_json::Value, String> {
     let recording = {
         let mut guard = state
@@ -95,10 +94,7 @@ fn stop_recording_and_transcribe(
         .map_err(|error| format!("Failed to read recorded audio: {error}"))?;
     let _ = std::fs::copy(&recording.path, std::env::temp_dir().join("dictophone-last.wav"));
 
-    let url = format!(
-        "http://127.0.0.1:8765/transcribe?language={}&polish={}",
-        language, polish
-    );
+    let url = format!("http://127.0.0.1:8765/transcribe?language={}", language);
     let client = reqwest::blocking::Client::new();
     let response = client
         .post(url)

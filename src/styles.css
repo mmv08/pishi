@@ -381,16 +381,6 @@ select {
   line-height: 1.5;
 }
 
-.raw-details {
-  margin-top: 8px;
-  color: #5b5850;
-  font-size: 13px;
-}
-
-.raw-details p {
-  margin: 8px 0 0;
-}
-
 .history-list {
   display: grid;
   gap: 8px;

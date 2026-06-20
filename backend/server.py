@@ -211,38 +211,50 @@ class Runtime:
             "duration_ms": round((time.perf_counter() - started) * 1000),
         }
 
-    def polish_text(self, text: str, language: str, mode: str) -> tuple[str, str, str | None]:
-        if mode == "off":
-            return text, "off", None
-        if mode == "light":
-            return deterministic_polish(text, language, mode), "rules", None
-
+    def polish_text(self, text: str, language: str) -> tuple[str, str, str | None]:
         load_result = {"ok": True}
         if self.polish_pipeline is None:
             load_result = self.load_polish_model()
         if not load_result.get("ok") or self.polish_pipeline is None:
             message = load_result.get("message", "OpenVINO polish model is not loaded.")
-            return text, "unavailable", str(message)
+            return "", "unavailable", str(message)
 
-        started = time.perf_counter()
-        prompt = polish_prompt(text, language)
         try:
             result = self.polish_pipeline.generate(
-                prompt,
+                polish_prompt(text, language),
                 max_new_tokens=polish_token_budget(text),
                 do_sample=False,
                 repetition_penalty=1.05,
                 stop_strings={"\n\n", "Dictated text:", "Task:"},
             )
         except Exception as exc:
-            return text, "error", f"{type(exc).__name__}: {exc}"
+            return "", "error", f"{type(exc).__name__}: {exc}"
 
         polished = sanitize_polish_output(result_to_text(result), text)
         if not polished:
-            return text, "empty", "Polish model returned empty text."
-        return polished, "openvino-npu", f"Polished in {round((time.perf_counter() - started) * 1000)} ms"
+            return "", "empty", "Polish model returned empty text."
+        if needs_polish_retry(polished):
+            try:
+                retry_result = self.polish_pipeline.generate(
+                    polish_retry_prompt(text, polished, language),
+                    max_new_tokens=polish_token_budget(text),
+                    do_sample=False,
+                    repetition_penalty=1.05,
+                    stop_strings={"\n\n", "Dictated text:", "Task:"},
+                )
+            except Exception as exc:
+                return "", "error", f"{type(exc).__name__}: {exc}"
 
-    def transcribe(self, audio: bytes, content_type: str, language: str, polish: str) -> dict[str, Any]:
+            retry_polished = sanitize_polish_output(result_to_text(retry_result), text)
+            if not retry_polished:
+                return "", "empty", "Polish model returned empty text on retry."
+            if needs_polish_retry(retry_polished):
+                return "", "invalid", "Polish model returned unpunctuated text after retry."
+            polished = retry_polished
+
+        return polished, "openvino-llm", None
+
+    def transcribe(self, audio: bytes, content_type: str, language: str) -> dict[str, Any]:
         started = time.perf_counter()
         wav_path: Path | None = None
         warning: str | None = None
@@ -257,7 +269,6 @@ class Runtime:
             if is_probably_silent(audio_level):
                 response = with_polish_response(
                     text="",
-                    polish=polish,
                     language=language,
                     started=started,
                     duration=duration,
@@ -284,7 +295,6 @@ class Runtime:
                     text = normalize_text(result_to_text(result))
                     return with_polish_response(
                         text=text,
-                        polish=polish,
                         language=language,
                         started=started,
                         duration=duration,
@@ -303,7 +313,6 @@ class Runtime:
             text = mock_transcript(duration, language)
             response = with_polish_response(
                 text=text,
-                polish=polish,
                 language=language,
                 started=started,
                 duration=duration,
@@ -334,6 +343,10 @@ def resolve_device(requested: str, devices: list[str]) -> str:
 
 
 def openvino_cache_kwargs(cache_root: Path, model_kind: str, device: str) -> dict[str, str]:
+    # CPU caching asks OpenVINO to serialize tokenizer graphs that 2026.1 cannot write back to XML.
+    if device == "CPU":
+        return {}
+
     try:
         cache_dir = cache_root / f"{model_kind}-{device.lower()}"
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -452,21 +465,16 @@ def normalize_text(text: str) -> str:
     return cleaned
 
 
-FILLERS = {
-    "en": ("um", "uh", "erm", "hmm"),
-    "de": ("äh", "ähm", "hm"),
-    "ru": ("э", "эм", "ээ", "ну"),
-}
-
-
-def deterministic_polish(text: str, language: str, mode: str) -> str:
-    words = FILLERS.get(language, FILLERS["en"])
-    pattern = r"(?i)\b(" + "|".join(re.escape(word) for word in words) + r")\b[, ]*"
-    polished = re.sub(pattern, "", text)
-    polished = normalize_text(polished)
-    if mode == "polished" and polished:
-        polished = polished[0].upper() + polished[1:]
-    return polished
+def needs_polish_retry(text: str) -> bool:
+    words = re.findall(r"\S+", text)
+    if len(words) < 18:
+        return False
+    sentence_lengths = [
+        len(re.findall(r"\S+", sentence))
+        for sentence in re.split(r"[.!?]+", text)
+        if sentence.strip()
+    ]
+    return not re.search(r"[.!?]", text) or any(length > 36 for length in sentence_lengths)
 
 
 def polish_prompt(text: str, language: str) -> str:
@@ -478,13 +486,17 @@ def polish_prompt(text: str, language: str) -> str:
     }.get(language, "Infer the language and preserve it. Do not translate.")
 
     return (
-        "Task: clean up dictated text.\n"
+        "Task: rewrite dictated speech as text the speaker could have typed.\n"
         "Rules:\n"
-        "- Preserve the exact original meaning.\n"
+        "- Preserve the speaker's intent and technical terms.\n"
         f"- {language_rule}\n"
-        "- Add normal punctuation and capitalization.\n"
-        "- Remove filler words, repeated words, and minor stutters.\n"
-        "- Return only the cleaned text.\n\n"
+        "- Add sentence breaks, punctuation, and capitalization.\n"
+        "- Remove filler words, repeated words, false starts, and minor stutters.\n"
+        "- Smooth spoken phrasing into natural written phrasing without adding new requests.\n"
+        "- Do not answer the request. Return only the rewritten text.\n\n"
+        "Example:\n"
+        "Dictated text: i need you to look through this project and figure out how we should add the new auth flow basically the current api is too coupled and and i want a plan before we change code\n"
+        "Cleaned text: I need you to look through this project and figure out how we should add the new auth flow. Basically, the current API is too coupled, and I want a plan before we change code.\n\n"
         "Example:\n"
         "Dictated text: das ist ein test und ich glaube es funktioniert\n"
         "Cleaned text: Das ist ein Test und ich glaube, es funktioniert.\n\n"
@@ -496,6 +508,29 @@ def polish_prompt(text: str, language: str) -> str:
         "Cleaned text: Ну вот это тест, я думаю, он должен работать.\n\n"
         f"Dictated text: {text}\n"
         "Cleaned text:"
+    )
+
+
+def polish_retry_prompt(original: str, first_pass: str, language: str) -> str:
+    language_rule = {
+        "en": "Use English.",
+        "de": "Use German. Do not translate.",
+        "ru": "Use Russian. Do not translate.",
+        "auto": "Use the same language as the dictated text.",
+    }.get(language, "Use the same language as the dictated text.")
+
+    return (
+        "The previous cleanup did not produce natural written prose.\n"
+        "Rewrite the dictated text again.\n"
+        "Requirements:\n"
+        f"- {language_rule}\n"
+        "- Add clear sentence boundaries and normal punctuation.\n"
+        "- Remove repeated words, filler, false starts, and spoken connectors when they do not belong in writing.\n"
+        "- Preserve the speaker's intent and technical terms.\n"
+        "- Do not answer the request. Return only the final rewritten text.\n\n"
+        f"Dictated text: {original}\n"
+        f"Previous cleanup: {first_pass}\n"
+        "Final rewritten text:"
     )
 
 
@@ -520,7 +555,6 @@ def sanitize_polish_output(output: str, original: str) -> str:
 
 def with_polish_response(
     text: str,
-    polish: str,
     language: str,
     started: float,
     duration: float,
@@ -530,12 +564,28 @@ def with_polish_response(
 ) -> dict[str, Any]:
     raw_text = normalize_text(text)
     polished = raw_text
-    polish_mode = "off"
-    polish_engine = "off"
-    warning: str | None = None
-    if raw_text and polish in {"light", "polished"}:
-        polish_mode = polish
-        polished, polish_engine, warning = runtime.polish_text(raw_text, language, polish)
+    polish_mode = "polished"
+    polish_engine = "none"
+    if raw_text:
+        polished, polish_engine, polish_error = runtime.polish_text(raw_text, language)
+        if not polished:
+            response = {
+                "ok": False,
+                "code": "POLISH_FAILED",
+                "message": polish_error or "Polish model did not return usable text.",
+                "text": "",
+                "raw_text": raw_text,
+                "polish": polish_mode,
+                "polish_engine": polish_engine,
+                "language": language,
+                "audio_duration_secs": round(duration, 2),
+                "duration_ms": round((time.perf_counter() - started) * 1000),
+                "device": device,
+                "mode": mode,
+            }
+            if audio_level is not None:
+                response["audio_level"] = audio_level
+            return response
 
     response = {
         "ok": True,
@@ -549,8 +599,6 @@ def with_polish_response(
         "device": device,
         "mode": mode,
     }
-    if warning is not None:
-        response["warning"] = warning
     if audio_level is not None:
         response["audio_level"] = audio_level
     return response
@@ -674,10 +722,9 @@ class Handler(BaseHTTPRequestHandler):
                 query = self.path.split("?", 1)[1] if "?" in self.path else ""
                 params = dict(part.split("=", 1) for part in query.split("&") if "=" in part)
                 language = params.get("language", "auto")
-                polish = params.get("polish", "off")
                 length = int(self.headers.get("Content-Length", "0"))
                 audio = self.rfile.read(length)
-                result = runtime.transcribe(audio, self.headers.get("Content-Type", ""), language, polish)
+                result = runtime.transcribe(audio, self.headers.get("Content-Type", ""), language)
                 json_response(self, 200 if result.get("ok") else 409, result)
                 return
 
@@ -685,12 +732,11 @@ class Handler(BaseHTTPRequestHandler):
                 payload = read_json(self)
                 text = normalize_text(str(payload.get("text", "")))
                 language = str(payload.get("language", "auto"))
-                mode = str(payload.get("polish", "light"))
-                polished, engine, warning = runtime.polish_text(text, language, mode)
-                body = {"ok": True, "text": polished, "raw_text": text, "polish_engine": engine}
-                if warning:
-                    body["warning"] = warning
-                json_response(self, 200, body)
+                polished, engine, error = runtime.polish_text(text, language)
+                body = {"ok": bool(polished), "text": polished, "raw_text": text, "polish_engine": engine}
+                if error:
+                    body["message"] = error
+                json_response(self, 200 if polished else 409, body)
                 return
 
             json_response(self, 404, {"ok": False, "code": "NOT_FOUND"})
@@ -708,13 +754,12 @@ def main() -> None:
     parser.add_argument("--smoke-wav", help="Transcribe one WAV file and exit")
     parser.add_argument("--device", default=os.environ.get("DICTOPHONE_DEVICE", "AUTO"))
     parser.add_argument("--language", default="en")
-    parser.add_argument("--polish", default="off")
     args = parser.parse_args()
 
     if args.smoke_wav:
         runtime.device = args.device
         with open(args.smoke_wav, "rb") as handle:
-            result = runtime.transcribe(handle.read(), "audio/wav", args.language, args.polish)
+            result = runtime.transcribe(handle.read(), "audio/wav", args.language)
         print(json.dumps(result, indent=2), flush=True)
         raise SystemExit(0 if result.get("ok") else 1)
 
